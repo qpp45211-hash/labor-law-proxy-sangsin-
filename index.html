@@ -116,9 +116,10 @@
 <script type="text/babel">
 const { useState } = React;
 
-// 상대 경로("")로 지정하면 내 PC 및 Render 서버 환경 모두에서 자동 동작합니다.
+// 상대 경로("")로 지정하면 로컬(PC)과 Render 배포 환경 모두에서 자동으로 동작합니다.
 const SERVER = "";
 
+// "【...】"로 감싸진 부분을 파란색 span으로 렌더링
 function highlight(text) {
   if (!text) return null;
   const parts = String(text).split(/(【[^】]*】)/g);
@@ -191,6 +192,7 @@ function LawCard({ law }) {
 }
 
 function App() {
+  const years = [];
   const currentYear = new Date().getFullYear();
   for (let y = 2023; y <= currentYear + 1; y++) years.push(y);
   const months = Array.from({length: 12}, (_, i) => i + 1);
@@ -235,7 +237,7 @@ function App() {
       }
 
       if (summaries.length === 0) {
-        throw new Error("법령 상세 정보를 가져오지 못했습니다. 법령 API 키(LAW_OC) 설정을 확인해 주세요.");
+        throw new Error("법령 상세 정보를 가져오지 못했습니다. 서버 상태 또는 법령 API 키(LAW_OC) 설정을 확인해 주세요.");
       }
 
       setLaws(summaries);
