@@ -191,8 +191,8 @@ function LawCard({ law }) {
 }
 
 function App() {
-  const years = [];
-  for (let y = 2023; y <= 2026; y++) years.push(y);
+  const currentYear = new Date().getFullYear();
+  for (let y = 2023; y <= currentYear + 1; y++) years.push(y);
   const months = Array.from({length: 12}, (_, i) => i + 1);
 
   const [year, setYear] = useState(2026);
