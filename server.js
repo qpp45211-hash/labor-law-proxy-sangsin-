@@ -8,6 +8,7 @@ app.use(express.static(__dirname));
 
 const OC = process.env.LAW_OC;
 
+// ① 그 달에 시행된 노동법 목록 가져오기
 app.get('/api/laws', async (req, res) => {
   const { year, month } = req.query;
   const mm = String(month).padStart(2, '0');
@@ -24,7 +25,6 @@ app.get('/api/laws', async (req, res) => {
 
     const allLaws = data.LawSearch?.law || [];
 
-    // 핵심 수정: '현행'뿐 아니라 '시행예정'(확정됐지만 아직 시행 전)도 포함
     const laborLaws = allLaws.filter(law =>
       law.소관부처명 &&
       law.소관부처명.includes('고용노동부') &&
@@ -39,6 +39,7 @@ app.get('/api/laws', async (req, res) => {
   }
 });
 
+// ② 법령 본문 원본 그대로 가져오기 (디버그용)
 app.get('/api/law-detail', async (req, res) => {
   const { mst, efYd } = req.query;
   const url = `https://www.law.go.kr/DRF/lawService.do?OC=${OC}&target=eflaw&MST=${mst}&type=JSON&efYd=${efYd}`;
@@ -60,6 +61,9 @@ app.get('/api/law-detail', async (req, res) => {
   }
 });
 
+// ---- 헬퍼 함수들 ----
+
+// law.go.kr 본문에 섞여 들어오는 <img ...>...ASCII표...</img> 블록을 걸러내기
 function stripEmbeddedTables(text) {
   if (!text) return text;
   return text
@@ -68,6 +72,7 @@ function stripEmbeddedTables(text) {
     .trim();
 }
 
+// 조문을 "제목 / 항 / 호" 조각(segment) 배열로 쪼개기
 function buildSegments(article) {
   const segs = [];
   if (article.조문내용) {
@@ -100,6 +105,7 @@ function buildSegments(article) {
 
 function joinSegs(segs) { return segs.map(s => s.text).join('\n'); }
 
+// 개정문 문장 하나를 분석: 위치 + 전/후 문구 쌍 + 동작유형(change/new/delete)
 function parseAmendmentLine(line) {
   if (!line) return null;
 
@@ -121,22 +127,25 @@ function parseAmendmentLine(line) {
     actionType = 'delete';
   }
 
+  // "중"이 없는 신설/삭제 문장은 문장 맨 앞의 위치만 뽑아냄
   if (!location) {
     const locOnly = line.match(/^(제\d+조(?:의\d+)?(?:제\d+항)?(?:제\d+호)?)/);
     location = locOnly ? locOnly[1] : '';
   }
 
-  if (pairs.length === 0 && actionType === 'change') return null;
+  if (pairs.length === 0 && actionType === 'change') return null; // 진짜 파싱 불가한 문장
 
   return { location, pairs, actionType, raw: line };
 }
 
+// 위치 문자열에서 조문번호/가지번호만 추출 ("제60조제6항제3호" -> {조문번호:"60"})
 function extractArticleNo(location) {
   const m = location.match(/^제(\d+)조(?:의(\d+))?/);
   if (!m) return null;
   return { 조문번호: m[1], 조문가지번호: m[2] || null };
 }
 
+// 위치 문자열에서 조/항/호 상세 추출
 function parseLocationDetail(location) {
   const 조 = location.match(/^제(\d+)조(?:의(\d+))?/);
   if (!조) return null;
@@ -160,6 +169,7 @@ function segMatchesLocation(seg, loc) {
   return false;
 }
 
+// ③ 조문 전체 개정 전/후 비교표 생성
 app.get('/api/law-summary', async (req, res) => {
   const { mst, efYd } = req.query;
   const url = `https://www.law.go.kr/DRF/lawService.do?OC=${OC}&target=eflaw&MST=${mst}&type=JSON&efYd=${efYd}`;
@@ -175,6 +185,7 @@ app.get('/api/law-summary', async (req, res) => {
     const 법령명 = law.기본정보?.법령명_한글 || '';
     const 시행일자 = law.기본정보?.시행일자 || '';
     const 공포일자 = law.기본정보?.공포일자 || '';
+    const isNewLaw = (law.기본정보?.제개정구분?.content || law.기본정보?.제개정구분 || '').includes('제정');
 
     const 개정이유원본 = law.제개정이유?.제개정이유내용 || [];
     const 시사점 = 개정이유원본
@@ -187,6 +198,26 @@ app.get('/api/law-summary', async (req, res) => {
     const parsedLines = 개정문원본.map(parseAmendmentLine).filter(Boolean);
 
     const 조문목록 = law.조문?.조문단위 || [];
+
+    // 신규 제정 법률인 경우: 개정 전/후 비교가 아니라 "조문 전체가 신규"로 처리
+    if (isNewLaw) {
+      const 비교표 = 조문목록
+        .filter(j => j.조문여부 === '조문')
+        .map(article => {
+          const segs = buildSegments(article);
+          const afterBase = joinSegs(segs);
+          const 위치제목 = `제${article.조문번호}조${article.조문가지번호 ? '의' + article.조문가지번호 : ''}` +
+            (article.조문제목 ? `(${article.조문제목})` : '');
+          return {
+            구분: '제정',
+            위치: 위치제목,
+            개정전: '(신규 제정된 법률로 개정 전 조문이 없습니다)',
+            개정후: afterBase
+          };
+        });
+      return res.json({ 법령명, 시행일자, 공포일자, 시사점: 시사점 || '개정이유 정보가 제공되지 않았습니다.', 비교표 });
+    }
+
     const 변경조문 = 조문목록.filter(j => j.조문변경여부 === 'Y');
 
     const 비교표 = 변경조문.map(article => {
@@ -268,6 +299,7 @@ app.get('/api/law-summary', async (req, res) => {
           anyMark = true;
         }
 
+        // 문구로 못 찾은 변경(표 등) - 표 안내문구라도 파란색으로 강조
         if (!anyMark) {
           const markTable = s => s.text.includes('[※ 표 있음')
             ? { ...s, text: s.text.replace('[※ 표 있음 - 원문은 law.go.kr에서 확인해주세요]', '【[※ 표 내용이 변경되었습니다 - 원문은 law.go.kr에서 확인해주세요]】') }
