@@ -173,13 +173,19 @@ function textHasDateMarker(text, dateMarkers) {
   return brackets.some(b => dateMarkers.some(d => b.includes(d)));
 }
 
-function markSubDeletionStubs(segsArray) {
+// 조각(호) 안에 "1. 삭제<2018.12.31>" 처럼 항목 단위 삭제 스텁이 있으면 파란색 표시 대상으로 마킹
+function markSubDeletionStubs(segsArray, dateMarkers) {
   let marked = false;
   const result = segsArray.map(s => {
     const t = s.text.trim();
-    if (/^[^\s"']+\.\s*삭제\s*[<〈][^>〉]*[>〉]\s*$/.test(t) && !s.text.includes('【')) {
-      marked = true;
-      return { ...s, text: `【${s.text}】` };
+    const m = t.match(/^[^\s"']+\.\s*삭제\s*[<〈]([^>〉]*)[>〉]\s*$/);
+    if (m && !s.text.includes('【')) {
+      const stubDate = m[1].trim();
+      // 이번 조회 기준 날짜(시행일/공포일)와 일치하는 삭제만 "지금 바뀐 것"으로 표시
+      if (dateMarkers.includes(stubDate)) {
+        marked = true;
+        return { ...s, text: `【${s.text}】` };
+      }
     }
     return s;
   });
@@ -309,8 +315,8 @@ app.get('/api/law-summary', async (req, res) => {
           anyMark = true;
         }
 
-        const afterSub = markSubDeletionStubs(afterSegs);
-        const beforeSub = markSubDeletionStubs(beforeSegs);
+        const afterSub = markSubDeletionStubs(afterSegs, dateMarkers);
+        const beforeSub = markSubDeletionStubs(beforeSegs, dateMarkers);
         afterSegs = afterSub.segs;
         beforeSegs = beforeSub.segs;
         if (afterSub.marked || beforeSub.marked) anyMark = true;
