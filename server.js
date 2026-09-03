@@ -168,11 +168,6 @@ function formatDateNoLeadingZero(yyyymmdd) {
   return `${y}.${m}.${d}`;
 }
 
-function textHasDateMarker(text, dateMarkers) {
-  const brackets = text.match(/<[^>]*>/g) || [];
-  return brackets.some(b => dateMarkers.some(d => b.includes(d)));
-}
-
 // 조각(호) 안에 "1. 삭제<2018.12.31>" 처럼 항목 단위 삭제 스텁이 있으면 파란색 표시 대상으로 마킹
 function markSubDeletionStubs(segsArray, dateMarkers) {
   let marked = false;
@@ -181,7 +176,6 @@ function markSubDeletionStubs(segsArray, dateMarkers) {
     const m = t.match(/^[^\s"']+\.\s*삭제\s*[<〈]([^>〉]*)[>〉]\s*$/);
     if (m && !s.text.includes('【')) {
       const stubDate = m[1].trim();
-      // 이번 조회 기준 날짜(시행일/공포일)와 일치하는 삭제만 "지금 바뀐 것"으로 표시
       if (dateMarkers.includes(stubDate)) {
         marked = true;
         return { ...s, text: `【${s.text}】` };
@@ -332,25 +326,22 @@ app.get('/api/law-summary', async (req, res) => {
           beforeSegs = beforeBeforeTable;
         }
 
-        if (!anyMark && textHasDateMarker(afterBase, dateMarkers)) {
-          afterSegs = segs.map(s => ({ ...s, text: `【${s.text}】` }));
-          beforeSegs = segs.map(s => ({ ...s, text: `【${s.text}】` }));
-          anyMark = true;
-        }
-
         if (hasNew) 구분 = '신설';
         else if (hasDelete) 구분 = '삭제';
 
         afterMarked = joinSegs(afterSegs) || afterBase;
         beforeMarked = beforeSegs.length ? joinSegs(beforeSegs) : '(해당 조문이 이번 개정으로 신설되었습니다)';
+      }
 
-        if (!anyMark) {
-          afterMarked += '\n《※ 세부 변경 문구를 자동으로 특정하지 못했습니다 - 원문을 확인해 주세요》';
-        }
+      // 개정 전/후가 (표시 마커를 제외하고) 완전히 동일한 문구라면
+      // 실질적으로 비교할 내용이 없는 것이므로 표에서 제외
+      const stripMarkers = t => (t || '').replace(/[【】《》]/g, '').trim();
+      if (stripMarkers(beforeMarked) === stripMarkers(afterMarked)) {
+        return null;
       }
 
       return { 구분, 위치: 위치제목, 개정전: beforeMarked, 개정후: afterMarked };
-    });
+    }).filter(Boolean);
 
     res.json({ 법령명, 시행일자, 공포일자, 시사점: 시사점 || '개정이유 정보가 제공되지 않았습니다.', 비교표 });
   } catch (e) {
