@@ -8,16 +8,42 @@ app.use(express.static(__dirname));
 
 const OC = process.env.LAW_OC;
 
+// 법제처가 JSON 대신 보내는 HTML 오류 페이지에서 사람이 읽을 수 있는 문장만 뽑아내기
+function readableFromHtml(text) {
+  return String(text || '')
+    .replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>|<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 200);
+}
+
 // 법제처 목록 API 한 페이지 가져오기 (결과가 1건이면 배열이 아닌 객체로 오는 경우까지 처리)
 async function fetchLawListPage(baseUrl, page) {
   const response = await fetch(`${baseUrl}&page=${page}`, {
     headers: { 'Referer': 'https://www.law.go.kr/' }
   });
-  const data = await response.json();
+  const text = await response.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch (parseErr) {
+    throw new Error(`법제처가 JSON이 아닌 응답을 보냈습니다 (${page}페이지, HTTP ${response.status}): ${readableFromHtml(text) || '내용 없음'}`);
+  }
   const ls = data.LawSearch || {};
   let arr = ls.law;
   if (!Array.isArray(arr)) arr = arr ? [arr] : [];
   return { total: Number(ls.totalCnt) || arr.length, laws: arr };
+}
+
+// 일시적인 오류에 대비해 1회 재시도
+async function fetchLawListPageWithRetry(baseUrl, page) {
+  try {
+    return await fetchLawListPage(baseUrl, page);
+  } catch (firstErr) {
+    console.error(`목록 ${page}페이지 1차 실패, 재시도:`, firstErr.message);
+    await new Promise(r => setTimeout(r, 700));
+    return await fetchLawListPage(baseUrl, page);
+  }
 }
 
 // ① 선택한 연/월 + 기준(시행일 or 공포일)에 해당하는 노동법 목록 가져오기
@@ -38,17 +64,26 @@ app.get('/api/laws', async (req, res) => {
 
   try {
     // 한 페이지에 최대 100건이라, 전체 건수(totalCnt)만큼 모든 페이지를 가져옴
-    const first = await fetchLawListPage(baseUrl, 1);
+    const first = await fetchLawListPageWithRetry(baseUrl, 1);   // 1페이지 실패 = 조회 불가 → 아래 catch에서 오류 응답
     let allLaws = [...first.laws];
     const totalPages = Math.min(Math.ceil(first.total / 100), 10);
+    let warning = null;
+
     for (let p = 2; p <= totalPages; p++) {
-      const next = await fetchLawListPage(baseUrl, p);
-      allLaws = allLaws.concat(next.laws);
+      try {
+        const next = await fetchLawListPageWithRetry(baseUrl, p);
+        allLaws = allLaws.concat(next.laws);
+      } catch (pageErr) {
+        // 2페이지 이후 실패: 가져온 데이터까지만 보여주되, 누락 가능성을 화면에 경고
+        console.error(`목록 ${p}/${totalPages}페이지 실패:`, pageErr.message);
+        warning = `법제처 목록 ${totalPages}페이지 중 ${p}페이지부터 가져오지 못해 일부 법령이 누락됐을 수 있습니다. 잠시 후 다시 검색해 주세요. (${pageErr.message})`;
+        break;
+      }
     }
 
     const laborLaws = allLaws.filter(law => {
-      if (!law.소관부처명 || !law.소관부처명.includes('고용노동부')) return false;
-      if (law.법령명한글.includes('직제')) return false;
+      if (!law || !law.소관부처명 || !law.소관부처명.includes('고용노동부')) return false;
+      if (String(law.법령명한글 || '').includes('직제')) return false;
       if (basis === 'prom') {
         // 공포일 기준: 선택한 달에 공포된 법령은 현행/시행예정/연혁 구분 없이 모두 표시
         return inRange(law.공포일자);
@@ -57,7 +92,8 @@ app.get('/api/laws', async (req, res) => {
       return inRange(law.시행일자) && (law.현행연혁코드 === '현행' || law.현행연혁코드 === '시행예정');
     });
 
-    res.json({ count: laborLaws.length, basis, laws: laborLaws });
+    const laws = laborLaws.map(l => ({ ...l, 법령명한글: l.법령명한글 || '(법령명 없음)' }));
+    res.json({ count: laws.length, basis, warning, laws });
   } catch (e) {
     console.error('진짜 에러 내용 (laws):', e);
     res.status(500).json({ error: e.message });

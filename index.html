@@ -64,6 +64,7 @@
   .llt-basis-hint { width: 100%; text-align: center; font-size: 12px; color: var(--ink-soft); margin-top: 2px; }
   .llt-resultbar { font-size: 13px; color: var(--ink-soft); margin: 0 4px 10px; }
   .llt-resultbar strong { color: var(--ink); }
+  .llt-warning { font-size: 13px; color: var(--gold); background: var(--note-bg); border: 1px solid var(--paper-line); border-radius: 8px; padding: 10px 14px; margin: 0 0 12px; line-height: 1.6; }
 
   .llt-status { text-align: center; color: var(--ink-soft); font-size: 14px; padding: 30px 0; }
   .llt-status .step { margin-bottom: 4px; }
@@ -265,6 +266,7 @@ function App() {
   const [error, setError] = useState(null);
   const [lawList, setLawList] = useState(null);
   const [searched, setSearched] = useState(false);
+  const [listWarning, setListWarning] = useState(null);
 
   const [expandedMst, setExpandedMst] = useState(null);
   const [detailCache, setDetailCache] = useState({});
@@ -277,11 +279,17 @@ function App() {
     setLawList(null);
     setSearched(true);
     setExpandedMst(null);
+    setListWarning(null);
 
     try {
       const listRes = await fetch(`${SERVER}/api/laws?year=${year}&month=${month}&basis=${basis}`);
-      if (!listRes.ok) throw new Error(`목록 조회 서버 오류 (${listRes.status})`);
+      if (!listRes.ok) {
+        // 서버가 보낸 구체적인 오류 문장이 있으면 그대로 보여줌
+        const errBody = await listRes.json().catch(() => null);
+        throw new Error(errBody && errBody.error ? errBody.error : `목록 조회 서버 오류 (${listRes.status})`);
+      }
       const listData = await listRes.json();
+      setListWarning(listData.warning || null);
       setLawList(listData.laws || []);
       setSearchedInfo({ year, month, basis });
     } catch (e) {
@@ -362,7 +370,7 @@ function App() {
       {error && (
         <div className="llt-error">
           ⚠ {error}<br/>
-          서버 연결 상태나 법령 API 키(LAW_OC) 설정을 확인해 주세요.
+          계속 같은 오류가 나면 이 문구를 그대로 알려주세요. (서버 연결 상태 / 법령 API 키(LAW_OC) 설정 점검에 쓰입니다)
         </div>
       )}
 
@@ -370,6 +378,10 @@ function App() {
         <div className="llt-resultbar">
           <strong>{searchedInfo.year}년 {searchedInfo.month}월 · {searchedInfo.basis === 'prom' ? '공포일' : '시행일'} 기준</strong> 조회 결과 {lawList.length}건
         </div>
+      )}
+
+      {!loading && !error && listWarning && (
+        <div className="llt-warning">⚠ {listWarning}</div>
       )}
 
       {!loading && !error && lawList && lawList.length === 0 && searchedInfo && (
