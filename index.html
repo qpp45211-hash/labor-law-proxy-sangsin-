@@ -53,6 +53,18 @@
   .llt-search button:hover { opacity: 0.85; }
   .llt-search button:disabled { opacity: 0.5; cursor: default; }
 
+  .llt-basis { display: inline-flex; border: 1px solid var(--paper-line); border-radius: 6px; overflow: hidden; }
+  .llt-basis button {
+    font-family: inherit; font-size: 14px; font-weight: 600; background: #fff; color: var(--ink-soft);
+    border: none; padding: 9px 14px; cursor: pointer; transition: background 0.15s, color 0.15s;
+  }
+  .llt-basis button + button { border-left: 1px solid var(--paper-line); }
+  .llt-basis button.active { background: var(--ink); color: #fff; }
+  .llt-basis button:hover:not(.active) { background: var(--paper); opacity: 1; }
+  .llt-basis-hint { width: 100%; text-align: center; font-size: 12px; color: var(--ink-soft); margin-top: 2px; }
+  .llt-resultbar { font-size: 13px; color: var(--ink-soft); margin: 0 4px 10px; }
+  .llt-resultbar strong { color: var(--ink); }
+
   .llt-status { text-align: center; color: var(--ink-soft); font-size: 14px; padding: 30px 0; }
   .llt-status .step { margin-bottom: 4px; }
   .llt-status .dot { display:inline-block; width:6px;height:6px;border-radius:50%; background:var(--gold); margin:0 3px; animation: llt-blink 1.2s infinite ease-in-out; }
@@ -69,7 +81,14 @@
   }
   .llt-lawbtn:hover { background: var(--paper); }
   .llt-lawbtn-name { font-family: "Noto Serif KR", "Nanum Myeongjo", serif; font-size: 17px; color: var(--ink); }
-  .llt-lawbtn-meta { font-size: 12.5px; color: var(--gold); font-weight: 700; white-space: nowrap; }
+  .llt-lawbtn-meta { font-size: 12.5px; color: var(--ink-soft); white-space: nowrap; }
+  .llt-lawbtn-meta .on { color: var(--gold); font-weight: 700; }
+  .llt-lawbtn-meta .sep { margin: 0 6px; color: var(--paper-line); }
+  .llt-tag { display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 4px; margin-left: 8px; vertical-align: middle; }
+  .llt-tag.예정 { color: var(--green); background: #e7f2ea; }
+  .llt-tag.연혁 { color: var(--ink-soft); background: var(--paper); border: 1px solid var(--paper-line); }
+  .llt-lawdates { font-size: 12.5px; color: var(--ink-soft); margin: 14px 0 0; }
+  .llt-lawdates b { color: var(--gold); }
   .llt-lawbtn-arrow { font-size: 13px; color: var(--ink-soft); transition: transform 0.15s; margin-left: 8px; }
   .llt-lawbtn-arrow.open { transform: rotate(90deg); }
 
@@ -183,19 +202,30 @@ function DiffTable({ rows }) {
   );
 }
 
-function LawItem({ law, expanded, onToggle, detail, loading, error }) {
-  const fmt = d => d ? d.replace(/(\d{4})(\d{2})(\d{2})/, "$1.$2.$3") : "";
+function LawItem({ law, basis, expanded, onToggle, detail, loading, error }) {
+  const fmt = d => d ? String(d).replace(/(\d{4})(\d{2})(\d{2})/, "$1.$2.$3") : "";
+  const statusTag = law.현행연혁코드 === '시행예정'
+    ? <span className="llt-tag 예정">시행예정</span>
+    : (law.현행연혁코드 === '연혁' ? <span className="llt-tag 연혁">이후 개정으로 대체됨</span> : null);
   return (
     <div className="llt-lawitem">
       <button className="llt-lawbtn" onClick={onToggle}>
-        <span className="llt-lawbtn-name">{law.법령명한글}</span>
+        <span className="llt-lawbtn-name">{law.법령명한글}{statusTag}</span>
         <span style={{display:"flex", alignItems:"center", gap:"10px"}}>
-          <span className="llt-lawbtn-meta">시행일 {fmt(law.시행일자)}</span>
+          <span className="llt-lawbtn-meta">
+            <span className={basis === 'prom' ? 'on' : ''}>공포일 {fmt(law.공포일자)}</span>
+            <span className="sep">|</span>
+            <span className={basis === 'eff' ? 'on' : ''}>시행일 {fmt(law.시행일자)}</span>
+          </span>
           <span className={`llt-lawbtn-arrow ${expanded ? "open" : ""}`}>▶</span>
         </span>
       </button>
       {expanded && (
         <div className="llt-lawbody">
+          <div className="llt-lawdates">
+            공포일 <b>{fmt(law.공포일자)}</b> · 시행일 <b>{fmt(law.시행일자)}</b>
+            {law.제개정구분명 ? <span> · {law.제개정구분명}</span> : null}
+          </div>
           {loading && (
             <div className="llt-lawbody-loading">
               개정 전후 내용을 불러오는 중입니다
@@ -228,6 +258,9 @@ function App() {
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
 
+  const [basis, setBasis] = useState('eff');            // eff: 시행일 기준 / prom: 공포일 기준
+  const [searchedInfo, setSearchedInfo] = useState(null); // 마지막으로 조회한 {year, month, basis}
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [lawList, setLawList] = useState(null);
@@ -246,10 +279,11 @@ function App() {
     setExpandedMst(null);
 
     try {
-      const listRes = await fetch(`${SERVER}/api/laws?year=${year}&month=${month}`);
+      const listRes = await fetch(`${SERVER}/api/laws?year=${year}&month=${month}&basis=${basis}`);
       if (!listRes.ok) throw new Error(`목록 조회 서버 오류 (${listRes.status})`);
       const listData = await listRes.json();
       setLawList(listData.laws || []);
+      setSearchedInfo({ year, month, basis });
     } catch (e) {
       console.error(e);
       setError(e.message || "조회 중 오류가 발생했습니다.");
@@ -259,19 +293,19 @@ function App() {
   }
 
   async function handleToggle(law) {
-    const mst = law.법령일련번호;
+    const mst = `${law.법령일련번호}_${law.시행일자}`;
     if (expandedMst === mst) {
       setExpandedMst(null);
       return;
     }
     setExpandedMst(mst);
 
-    if (detailCache[mst]) return;
+    if (detailCache[mst]) return; // 이미 불러온 적 있으면 재요청 안 함
 
     setDetailLoading(mst);
     setDetailError(prev => ({ ...prev, [mst]: null }));
     try {
-      const res = await fetch(`${SERVER}/api/law-summary?mst=${mst}&efYd=${law.시행일자}`);
+      const res = await fetch(`${SERVER}/api/law-summary?mst=${law.법령일련번호}&efYd=${law.시행일자}`);
       const data = await res.json();
       if (!res.ok || data.error) throw new Error(data.error || `상세 조회 서버 오류 (${res.status})`);
       setDetailCache(prev => ({ ...prev, [mst]: data }));
@@ -304,9 +338,18 @@ function App() {
         <select id="llt-month" value={month} onChange={e => setMonth(Number(e.target.value))}>
           {months.map(m => <option key={m} value={m}>{m}월</option>)}
         </select>
+        <span className="llt-basis" role="group" aria-label="조회 기준">
+          <button className={basis === 'eff' ? 'active' : ''} onClick={() => setBasis('eff')}>시행일 기준</button>
+          <button className={basis === 'prom' ? 'active' : ''} onClick={() => setBasis('prom')}>공포일 기준</button>
+        </span>
         <button onClick={handleSearch} disabled={loading}>
           {loading ? "조회 중..." : "개정 내역 검색"}
         </button>
+        <div className="llt-basis-hint">
+          {basis === 'eff'
+            ? "선택한 달에 시행되는 법령을 보여줍니다 (공포일은 별도 표시)"
+            : "선택한 달에 공포된 법령을 보여줍니다 (시행일은 별도 표시)"}
+        </div>
       </div>
 
       {loading && (
@@ -323,21 +366,30 @@ function App() {
         </div>
       )}
 
-      {!loading && !error && lawList && lawList.length === 0 && (
-        <div className="llt-empty">{year}년 {month}월에는 고용노동부 소관 법령 개정 시행 내역이 없습니다.</div>
+      {!loading && !error && lawList && searchedInfo && (
+        <div className="llt-resultbar">
+          <strong>{searchedInfo.year}년 {searchedInfo.month}월 · {searchedInfo.basis === 'prom' ? '공포일' : '시행일'} 기준</strong> 조회 결과 {lawList.length}건
+        </div>
+      )}
+
+      {!loading && !error && lawList && lawList.length === 0 && searchedInfo && (
+        <div className="llt-empty">
+          {searchedInfo.year}년 {searchedInfo.month}월에 {searchedInfo.basis === 'prom' ? '공포된' : '시행되는'} 고용노동부 소관 법령이 없습니다.
+        </div>
       )}
 
       {!loading && lawList && lawList.length > 0 && (
         <div className="llt-lawlist">
           {lawList.map((law, i) => (
             <LawItem
-              key={i}
+              key={`${law.법령일련번호}_${law.시행일자}_${i}`}
               law={law}
-              expanded={expandedMst === law.법령일련번호}
+              basis={searchedInfo ? searchedInfo.basis : basis}
+              expanded={expandedMst === `${law.법령일련번호}_${law.시행일자}`}
               onToggle={() => handleToggle(law)}
-              detail={detailCache[law.법령일련번호]}
-              loading={detailLoading === law.법령일련번호}
-              error={detailError[law.법령일련번호]}
+              detail={detailCache[`${law.법령일련번호}_${law.시행일자}`]}
+              loading={detailLoading === `${law.법령일련번호}_${law.시행일자}`}
+              error={detailError[`${law.법령일련번호}_${law.시행일자}`]}
             />
           ))}
         </div>

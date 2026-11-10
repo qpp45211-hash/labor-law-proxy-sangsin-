@@ -8,30 +8,56 @@ app.use(express.static(__dirname));
 
 const OC = process.env.LAW_OC;
 
+// 법제처 목록 API 한 페이지 가져오기 (결과가 1건이면 배열이 아닌 객체로 오는 경우까지 처리)
+async function fetchLawListPage(baseUrl, page) {
+  const response = await fetch(`${baseUrl}&page=${page}`, {
+    headers: { 'Referer': 'https://www.law.go.kr/' }
+  });
+  const data = await response.json();
+  const ls = data.LawSearch || {};
+  let arr = ls.law;
+  if (!Array.isArray(arr)) arr = arr ? [arr] : [];
+  return { total: Number(ls.totalCnt) || arr.length, laws: arr };
+}
+
+// ① 선택한 연/월 + 기준(시행일 or 공포일)에 해당하는 노동법 목록 가져오기
+//    basis=eff(기본, 시행일 기준) / basis=prom(공포일 기준)
 app.get('/api/laws', async (req, res) => {
   const { year, month } = req.query;
-  const mm = String(month).padStart(2, '0');
-  const lastDay = new Date(year, month, 0).getDate();
-  const efYd = `${year}${mm}01~${year}${mm}${lastDay}`;
+  const basis = req.query.basis === 'prom' ? 'prom' : 'eff';
 
-  const url = `https://www.law.go.kr/DRF/lawSearch.do?OC=${OC}&target=eflaw&type=JSON&display=100&efYd=${efYd}`;
+  const mm = String(month).padStart(2, '0');
+  const lastDay = String(new Date(year, month, 0).getDate()).padStart(2, '0');
+  const startYmd = `${year}${mm}01`;
+  const endYmd = `${year}${mm}${lastDay}`;
+  const range = `${startYmd}~${endYmd}`;
+  const dateParam = basis === 'prom' ? `ancYd=${range}` : `efYd=${range}`;
+
+  const baseUrl = `https://www.law.go.kr/DRF/lawSearch.do?OC=${OC}&target=eflaw&type=JSON&display=100&${dateParam}`;
+  const inRange = v => { const s = String(v || ''); return s >= startYmd && s <= endYmd; };
 
   try {
-    const response = await fetch(url, {
-      headers: { 'Referer': 'https://www.law.go.kr/' }
+    // 한 페이지에 최대 100건이라, 전체 건수(totalCnt)만큼 모든 페이지를 가져옴
+    const first = await fetchLawListPage(baseUrl, 1);
+    let allLaws = [...first.laws];
+    const totalPages = Math.min(Math.ceil(first.total / 100), 10);
+    for (let p = 2; p <= totalPages; p++) {
+      const next = await fetchLawListPage(baseUrl, p);
+      allLaws = allLaws.concat(next.laws);
+    }
+
+    const laborLaws = allLaws.filter(law => {
+      if (!law.소관부처명 || !law.소관부처명.includes('고용노동부')) return false;
+      if (law.법령명한글.includes('직제')) return false;
+      if (basis === 'prom') {
+        // 공포일 기준: 선택한 달에 공포된 법령은 현행/시행예정/연혁 구분 없이 모두 표시
+        return inRange(law.공포일자);
+      }
+      // 시행일 기준: 현행 + 시행예정만 (이후 개정으로 대체된 옛 버전은 제외)
+      return inRange(law.시행일자) && (law.현행연혁코드 === '현행' || law.현행연혁코드 === '시행예정');
     });
-    const data = await response.json();
 
-    const allLaws = data.LawSearch?.law || [];
-
-    const laborLaws = allLaws.filter(law =>
-      law.소관부처명 &&
-      law.소관부처명.includes('고용노동부') &&
-      (law.현행연혁코드 === '현행' || law.현행연혁코드 === '시행예정') &&
-      !law.법령명한글.includes('직제')
-    );
-
-    res.json({ count: laborLaws.length, laws: laborLaws });
+    res.json({ count: laborLaws.length, basis, laws: laborLaws });
   } catch (e) {
     console.error('진짜 에러 내용 (laws):', e);
     res.status(500).json({ error: e.message });
@@ -59,6 +85,9 @@ app.get('/api/law-detail', async (req, res) => {
   }
 });
 
+// ---- 헬퍼 함수들 ----
+
+// law.go.kr 본문에 섞여 들어오는 <img ...>...ASCII표...</img> 블록을 걸러내기
 function stripEmbeddedTables(text) {
   if (!text) return text;
   return text
@@ -67,6 +96,7 @@ function stripEmbeddedTables(text) {
     .trim();
 }
 
+// 조문을 "제목 / 항 / 호" 조각(segment) 배열로 쪼개기
 function buildSegments(article) {
   const segs = [];
   if (article.조문내용) {
@@ -100,6 +130,7 @@ function buildSegments(article) {
 function joinSegs(segs) { return segs.map(s => s.text).join('\n'); }
 function cloneSegs(segs) { return segs.map(s => ({ ...s })); }
 
+// 개정문 문장 하나를 분석: 위치 + 전/후 문구 쌍 + 동작유형(change/new/delete)
 function parseAmendmentLine(line) {
   if (!line) return null;
 
@@ -160,6 +191,7 @@ function segMatchesLocation(seg, loc) {
   return false;
 }
 
+// "20260819" -> "2026.8.19" (법령 원문의 <개정 2026.8.19> 표기와 형식 맞추기)
 function formatDateNoLeadingZero(yyyymmdd) {
   if (!yyyymmdd || yyyymmdd.length !== 8) return null;
   const y = yyyymmdd.slice(0, 4);
@@ -176,6 +208,8 @@ function markSubDeletionStubs(segsArray, dateMarkers) {
     const m = t.match(/^[^\s"']+\.\s*삭제\s*[<〈]([^>〉]*)[>〉]\s*$/);
     if (m && !s.text.includes('【')) {
       const stubDate = m[1].trim();
+      // 이번 조회 기준 날짜(시행일/공포일)와 일치하는 삭제만 "지금 바뀐 것"으로 표시
+      // (몇 년 전에 이미 삭제된 옛날 항목까지 잘못 강조되지 않도록)
       if (dateMarkers.includes(stubDate)) {
         marked = true;
         return { ...s, text: `【${s.text}】` };
@@ -186,6 +220,7 @@ function markSubDeletionStubs(segsArray, dateMarkers) {
   return { segs: result, marked };
 }
 
+// ③ 조문 전체 개정 전/후 비교표 생성
 app.get('/api/law-summary', async (req, res) => {
   const { mst, efYd } = req.query;
   const url = `https://www.law.go.kr/DRF/lawService.do?OC=${OC}&target=eflaw&MST=${mst}&type=JSON&efYd=${efYd}`;
@@ -217,6 +252,7 @@ app.get('/api/law-summary', async (req, res) => {
 
     const 조문목록 = law.조문?.조문단위 || [];
 
+    // 신규 제정 법률: 개정 전/후 비교가 아니라 "조문 전체가 신규"로 처리
     if (isNewLaw) {
       const 비교표 = 조문목록
         .filter(j => j.조문여부 === '조문')
@@ -251,6 +287,7 @@ app.get('/api/law-summary', async (req, res) => {
       let afterMarked, beforeMarked;
 
       if (isDeletionStub) {
+        // 조문 전체가 삭제 스텁인 경우
         구분 = '삭제';
         afterMarked = `【${trimmedAfter}】`;
         beforeMarked = '(삭제 전 원문은 제공되지 않습니다 - 법령 연혁 조회에서 확인 가능합니다)';
@@ -260,6 +297,7 @@ app.get('/api/law-summary', async (req, res) => {
         let anyMark = false;
         let hasNew = false, hasDelete = false;
 
+        // 1) 인용부호 기반 문구 치환 / 신설·삭제 위치 처리
         matched.forEach(p => {
           const loc = parseLocationDetail(p.location);
           if (!loc) return;
@@ -309,12 +347,14 @@ app.get('/api/law-summary', async (req, res) => {
           anyMark = true;
         }
 
+        // 2) 항목(호) 단위 삭제 스텁("1. 삭제<날짜>") 마킹 - 항상 수행
         const afterSub = markSubDeletionStubs(afterSegs, dateMarkers);
         const beforeSub = markSubDeletionStubs(beforeSegs, dateMarkers);
         afterSegs = afterSub.segs;
         beforeSegs = beforeSub.segs;
         if (afterSub.marked || beforeSub.marked) anyMark = true;
 
+        // 3) 표(이미지) 변경 - 문구로 못 찾았을 때 표 안내문이라도 강조
         if (!anyMark) {
           const markTable = s => s.text.includes('[※ 표 있음')
             ? { ...s, text: s.text.replace('[※ 표 있음 - 원문은 law.go.kr에서 확인해주세요]', '【[※ 표 내용이 변경되었습니다 - 원문은 law.go.kr에서 확인해주세요]】') }
