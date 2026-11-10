@@ -8,6 +8,40 @@ app.use(express.static(__dirname));
 
 const OC = process.env.LAW_OC;
 
+// Node의 "fetch failed"는 겉 메시지일 뿐, 진짜 원인은 e.cause에 들어 있음 → 꺼내서 한국어 설명과 함께 반환
+const FETCH_HINTS = {
+  ENOTFOUND: '도메인을 찾지 못함 (인터넷/DNS 연결 문제 가능성)',
+  EAI_AGAIN: 'DNS 조회 일시 실패 (네트워크 문제 가능성)',
+  ECONNRESET: '법제처 쪽에서 연결을 끊음 (차단·과부하 가능성)',
+  ECONNREFUSED: '연결이 거부됨',
+  ETIMEDOUT: '연결 시간 초과',
+  UND_ERR_CONNECT_TIMEOUT: '연결 시간 초과',
+  UNABLE_TO_VERIFY_LEAF_SIGNATURE: '인증서 검증 실패 (보안 프로그램/프록시가 통신을 가로채는 환경 가능성)',
+  SELF_SIGNED_CERT_IN_CHAIN: '인증서 검증 실패 (보안 프로그램/프록시가 통신을 가로채는 환경 가능성)',
+  CERT_HAS_EXPIRED: '인증서 만료'
+};
+function describeFetchError(e) {
+  if (!e) return '알 수 없는 오류';
+  if (e.name === 'TimeoutError' || e.name === 'AbortError') return '법제처 응답 시간 초과 (20초 안에 응답이 없었습니다)';
+  const c = e.cause;
+  if (!c) return e.message;
+  const code = c.code || c.name || '';
+  const hint = FETCH_HINTS[code] ? ` → ${FETCH_HINTS[code]}` : '';
+  return `${e.message} — 원인: ${[code, c.message].filter(Boolean).join(' / ')}${hint}`;
+}
+
+// 법제처 호출 공통 함수 (20초 타임아웃 + 오류 원인 설명)
+async function lawFetch(url) {
+  try {
+    return await fetch(url, {
+      headers: { 'Referer': 'https://www.law.go.kr/' },
+      signal: AbortSignal.timeout(20000)
+    });
+  } catch (e) {
+    throw new Error(describeFetchError(e));
+  }
+}
+
 // 법제처가 JSON 대신 보내는 HTML 오류 페이지에서 사람이 읽을 수 있는 문장만 뽑아내기
 function readableFromHtml(text) {
   return String(text || '')
@@ -19,9 +53,7 @@ function readableFromHtml(text) {
 
 // 법제처 목록 API 한 페이지 가져오기 (결과가 1건이면 배열이 아닌 객체로 오는 경우까지 처리)
 async function fetchLawListPage(baseUrl, page) {
-  const response = await fetch(`${baseUrl}&page=${page}`, {
-    headers: { 'Referer': 'https://www.law.go.kr/' }
-  });
+  const response = await lawFetch(`${baseUrl}&page=${page}`);
   const text = await response.text();
   let data;
   try {
@@ -105,9 +137,7 @@ app.get('/api/law-detail', async (req, res) => {
   const url = `https://www.law.go.kr/DRF/lawService.do?OC=${OC}&target=eflaw&MST=${mst}&type=JSON&efYd=${efYd}`;
 
   try {
-    const response = await fetch(url, {
-      headers: { 'Referer': 'https://www.law.go.kr/' }
-    });
+    const response = await lawFetch(url);
     const rawText = await response.text();
     try {
       const data = JSON.parse(rawText);
@@ -262,9 +292,7 @@ app.get('/api/law-summary', async (req, res) => {
   const url = `https://www.law.go.kr/DRF/lawService.do?OC=${OC}&target=eflaw&MST=${mst}&type=JSON&efYd=${efYd}`;
 
   try {
-    const response = await fetch(url, {
-      headers: { 'Referer': 'https://www.law.go.kr/' }
-    });
+    const response = await lawFetch(url);
     const data = await response.json();
     const law = data.법령;
     if (!law) return res.status(500).json({ error: '법령 데이터 형식이 예상과 다릅니다' });
